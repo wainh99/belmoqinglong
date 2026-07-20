@@ -1,0 +1,8 @@
+{
+  "name": "qinglong-panel",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "echo 跳过构建，直接使用Docker镜像",
+    "start": "/usr/bin/supervisord -c /etc/supervisor/conf.d/supervisord.conf"
+  }
+}
