@@ -1,9 +1,6 @@
-FROM whyour/qinglong:latest
-# 设置时区
-ENV TZ=Asia/Shanghai
-# 开放面板端口
-EXPOSE 5700
-# 持久化数据目录
-VOLUME ["/ql/data"]
-# 容器启动命令（青龙内置进程管理）
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+FROM python:3.12-slim
+WORKDIR /app
+COPY main.py requirements.txt ./
+ENV WS_PATH=/tk-rail
+EXPOSE 8080
+CMD ["python3", "main.py"]
