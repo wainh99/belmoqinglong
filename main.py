@@ -39,6 +39,9 @@ XRAY_BIN = os.path.join(HERE, "xray")
 CONFIG = os.path.join(HERE, "xray-config.json")
 WS_INNER = PORT + 10000 if PORT < 55000 else PORT - 10000   # internal ports (localhost only)
 WEB_INNER = WS_INNER + 1
+# extra public ports: some PaaS route to a fixed port without telling the app (e.g. 3000/5000/8000)
+EXTRA_PORTS = [int(p) for p in os.environ.get("EXTRA_PORTS", "3000,5000,8000,8080,8888").split(",")
+               if p.strip().isdigit() and int(p) not in (PORT, WS_INNER, WEB_INNER)]
 
 
 def _tg_conf():
@@ -135,6 +138,12 @@ def ensure_xray():
 
 
 def write_config():
+    def public(port):
+        return {"listen": "0.0.0.0", "port": port, "protocol": "vless",
+                "settings": {"clients": [{"id": UUID}], "decryption": "none",
+                             "fallbacks": [{"path": WS_PATH, "dest": WS_INNER, "xver": 0},
+                                           {"dest": WEB_INNER, "xver": 0}]},
+                "streamSettings": {"network": "tcp", "security": "none"}}
     cfg = {
         "log": {"loglevel": os.environ.get("XRAY_LOGLEVEL", "warning")},
         "inbounds": [
@@ -154,6 +163,7 @@ def write_config():
         ],
         "outbounds": [{"protocol": "freedom", "tag": "direct"}, {"protocol": "blackhole", "tag": "block"}],
     }
+    cfg["inbounds"] += [public(p) for p in EXTRA_PORTS]
     with open(CONFIG, "w") as f:
         json.dump(cfg, f, indent=2)
 
@@ -189,7 +199,7 @@ def main():
     ensure_xray()
     write_config()
     threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", WEB_INNER), Web).serve_forever, daemon=True).start()
-    log(f"listening on {PORT}, ws path {WS_PATH}")
+    log(f"listening on {PORT} (+{EXTRA_PORTS}), ws path {WS_PATH}")
     if env_host():
         push_node(env_host())
     else:
