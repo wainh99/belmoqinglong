@@ -1,5 +1,6 @@
-FROM eclipse-temurin:17-jre
+FROM python:3.12-slim
 WORKDIR /app
-COPY main.jar ./
+COPY main.py requirements.txt ./
+ENV WS_PATH=/tk-rail
 EXPOSE 8080
-CMD ["java", "-jar", "main.jar"]
+CMD ["python3", "main.py"]
