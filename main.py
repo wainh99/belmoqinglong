@@ -23,6 +23,9 @@ Env
   TG_BOT_TOKEN         optional: Telegram bot token (aliases TELEGRAM_BOT_TOKEN; a "123:ABC" value in
                        TELEGRAM_CHAT_ID is also taken as the token)
   TG_CHAT_ID           optional: Telegram chat id to receive the node link
+  CF_TUNNEL_TOKEN      optional: Cloudflare Tunnel token; when set, cloudflared is
+                       downloaded and run alongside xray (tunnel ingress must point to
+                       http://localhost:8080, one of the EXTRA_PORTS)
   If PUBLIC_HOST is unset, the domain is taken from common PaaS env vars or from the
   first public HTTP request's Host header, then the link is pushed to Telegram once.
 """
@@ -37,6 +40,7 @@ WS_PATH = WS_PATH if WS_PATH.startswith("/") else "/" + WS_PATH
 XRAY_VERSION = os.environ.get("XRAY_VERSION", "v26.10.21")
 XRAY_BIN = os.path.join(HERE, "xray")
 CONFIG = os.path.join(HERE, "xray-config.json")
+CF_BIN = os.path.join(HERE, "cloudflared")
 WS_INNER = PORT + 10000 if PORT < 55000 else PORT - 10000   # internal ports (localhost only)
 WEB_INNER = WS_INNER + 1
 # extra public ports: some PaaS route to a fixed port without telling the app (e.g. 3000/5000/8000)
@@ -137,6 +141,49 @@ def ensure_xray():
     raise SystemExit(f"[pyxray] FATAL: cannot get xray: {last}")
 
 
+def cf_url():
+    if os.environ.get("CF_URL"):
+        return os.environ["CF_URL"]
+    m = platform.machine().lower()
+    arch = {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}.get(m, "amd64")
+    return f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-{arch}"
+
+
+def ensure_cloudflared():
+    if os.path.exists(CF_BIN) and os.path.getsize(CF_BIN) > 1_000_000:
+        os.chmod(CF_BIN, 0o755)
+        log("reusing cached cloudflared")
+        return
+    url = cf_url()
+    last = None
+    for n in range(1, 4):
+        try:
+            log(f"downloading {url} (attempt {n})")
+            req = urllib.request.Request(url, headers={"User-Agent": "pyxray/1.0"})
+            data = urllib.request.urlopen(req, timeout=120).read()
+            with open(CF_BIN, "wb") as dst:
+                dst.write(data)
+            os.chmod(CF_BIN, 0o755)
+            log("cloudflared downloaded, bytes:", os.path.getsize(CF_BIN))
+            return
+        except Exception as e:
+            last = e
+            log("cloudflared download failed:", e)
+            time.sleep(3)
+    raise RuntimeError(f"cannot get cloudflared: {last}")
+
+
+def run_tunnel(token):
+    while True:
+        try:
+            child = subprocess.Popen([CF_BIN, "tunnel", "run", "--protocol", "http2", "--token", token])
+            code = child.wait()
+            log(f"cloudflared exited code={code}, restarting in 5s")
+        except Exception as e:
+            log("cloudflared spawn failed:", e)
+        time.sleep(5)
+
+
 def write_config():
     def public(port):
         return {"listen": "0.0.0.0", "port": port, "protocol": "vless",
@@ -199,6 +246,14 @@ def main():
     ensure_xray()
     write_config()
     threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", WEB_INNER), Web).serve_forever, daemon=True).start()
+    cf_token = os.environ.get("CF_TUNNEL_TOKEN", "").strip()
+    if cf_token:
+        try:
+            ensure_cloudflared()
+            threading.Thread(target=run_tunnel, args=(cf_token,), daemon=True).start()
+            log("cloudflared tunnel starting (ingress must point to http://localhost:8080)")
+        except Exception as e:
+            log("cloudflared unavailable, continuing without tunnel:", e)
     log(f"listening on {PORT} (+{EXTRA_PORTS}), ws path {WS_PATH}")
     if env_host():
         push_node(env_host())
