@@ -20,6 +20,11 @@ Env
   XRAY_ZIP_URL         override download URL
   PUBLIC_HOST          optional: domain/IP clients use (for printing the share link)
   PUBLIC_TLS           "1" if the platform terminates TLS for you (PaaS domain, port 443)
+  TG_BOT_TOKEN         optional: Telegram bot token (aliases TELEGRAM_BOT_TOKEN; a "123:ABC" value in
+                       TELEGRAM_CHAT_ID is also taken as the token)
+  TG_CHAT_ID           optional: Telegram chat id to receive the node link
+  If PUBLIC_HOST is unset, the domain is taken from common PaaS env vars or from the
+  first public HTTP request's Host header, then the link is pushed to Telegram once.
 """
 import io, json, os, platform, signal, subprocess, sys, threading, time, urllib.parse, urllib.request, uuid, zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -34,6 +39,61 @@ XRAY_BIN = os.path.join(HERE, "xray")
 CONFIG = os.path.join(HERE, "xray-config.json")
 WS_INNER = PORT + 10000 if PORT < 55000 else PORT - 10000   # internal ports (localhost only)
 WEB_INNER = WS_INNER + 1
+
+
+def _tg_conf():
+    tok = os.environ.get("TG_BOT_TOKEN") or os.environ.get("TELEGRAM_BOT_TOKEN") or ""
+    chat = os.environ.get("TG_CHAT_ID") or ""
+    t2 = os.environ.get("TELEGRAM_CHAT_ID") or ""
+    if ":" in t2 and not tok:
+        tok = t2
+    elif t2 and not chat:
+        chat = t2
+    return tok.strip(), chat.strip()
+
+
+_pushed = set()
+_push_lock = threading.Lock()
+
+
+def push_node(host):
+    host = (host or "").split(",")[0].split(":")[0].strip().lower()
+    if not host or host in ("localhost",) or host.replace(".", "").isdigit():
+        return
+    with _push_lock:
+        if host in _pushed:
+            return
+        _pushed.add(host)
+    os.environ["PUBLIC_HOST"] = host
+    link = share_link()
+    log("share link:", link)
+    tok, chat = _tg_conf()
+    if not (tok and chat):
+        return
+
+    def send():
+        text = f"pyxray node online\nhost: {host}\n\n{link}"
+        data = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
+        for n in range(3):
+            try:
+                urllib.request.urlopen(f"https://api.telegram.org/bot{tok}/sendMessage", data, timeout=20).read()
+                log("node pushed to telegram")
+                return
+            except Exception as e:
+                log("telegram push failed:", e)
+                time.sleep(5)
+    threading.Thread(target=send, daemon=True).start()
+
+
+def env_host():
+    for k in ("PUBLIC_HOST", "RAILWAY_PUBLIC_DOMAIN", "RENDER_EXTERNAL_HOSTNAME", "KOYEB_PUBLIC_DOMAIN",
+              "FLY_APP_NAME", "VERCEL_URL", "APP_DOMAIN", "DOMAIN", "HOSTNAME_PUBLIC"):
+        v = os.environ.get(k)
+        if v:
+            if k == "FLY_APP_NAME":
+                v = v + ".fly.dev"
+            return v.replace("https://", "").replace("http://", "").strip("/")
+    return ""
 
 
 def log(*a):
@@ -100,6 +160,7 @@ def write_config():
 
 class Web(BaseHTTPRequestHandler):
     def do_GET(self):
+        push_node(self.headers.get("X-Forwarded-Host") or self.headers.get("Host"))
         body = b"OK\n"
         self.send_response(200)
         self.send_header("Content-Type", "text/plain")
@@ -129,7 +190,10 @@ def main():
     write_config()
     threading.Thread(target=ThreadingHTTPServer(("127.0.0.1", WEB_INNER), Web).serve_forever, daemon=True).start()
     log(f"listening on {PORT}, ws path {WS_PATH}")
-    log("share link:", share_link())
+    if env_host():
+        push_node(env_host())
+    else:
+        log("share link (host unknown until first request):", share_link())
 
     child = None
 
